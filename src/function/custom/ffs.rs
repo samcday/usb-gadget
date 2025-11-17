@@ -11,11 +11,13 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     fmt,
-    io::{ErrorKind, Read, Write},
+    io::{ErrorKind, Write},
     num::TryFromIntError,
     os::fd::RawFd,
     path::Path,
 };
+#[cfg(feature = "io")]
+use std::io::Read;
 
 use crate::{linux_version, Language};
 
@@ -525,6 +527,7 @@ impl CtrlReq {
 }
 
 /// FunctionFS event type.
+#[cfg(feature = "io")]
 pub mod event {
     pub const BIND: u8 = 0;
     pub const UNBIND: u8 = 1;
@@ -536,11 +539,13 @@ pub mod event {
 }
 
 /// FunctionFS event.
+#[cfg(feature = "io")]
 pub struct Event {
     pub data: [u8; 8],
     pub event_type: u8,
 }
 
+#[cfg(feature = "io")]
 impl Event {
     /// Size of raw event data.
     pub const SIZE: usize = 12;

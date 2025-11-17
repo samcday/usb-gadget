@@ -37,6 +37,9 @@ Features
 
 This crate provides the following optional features:
 
+* `io` (enabled by default): provides the high-level FunctionFS runtime (including endpoint helpers
+  and Linux AIO). Disable this feature to consume only the descriptor/configfs layer and manage the
+  FunctionFS file descriptors yourself.
 * `tokio`: enables async support for custom USB functions on top of the Tokio runtime.
 
 Requirements

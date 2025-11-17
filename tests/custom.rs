@@ -1,3 +1,5 @@
+#![cfg(feature = "io")]
+
 use std::{thread, time::Duration};
 use uuid::uuid;
 

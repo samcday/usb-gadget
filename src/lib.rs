@@ -18,6 +18,14 @@
 //! Start defining an USB gadget by calling [`Gadget::new`].
 //! When the gadget is fully specified, call [`Gadget::bind`] to register it with
 //! a [USB device controller (UDC)](Udc).
+//!
+//! ### Features
+//!
+//! - `io` *(enabled by default)*: Includes the FunctionFS runtime layer with endpoint I/O helpers.
+//!   Disable this feature to use only the descriptor/configfs layer and manage endpoint file
+//!   descriptors manually.
+//! - `tokio`: Adds the async convenience methods on top of the I/O layer. The async methods are only
+//!   available when both `io` and `tokio` are enabled.
 
 #![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]

@@ -11,12 +11,14 @@ version = "0.7.6"
 edition = "2021"
 
 [features]
-default = []
+default = ["io"]
+io = ["dep:bytes"]
+tokio = ["dep:tokio"]
 
 [dependencies]
 bitflags = "2.4"
 byteorder = "1"
-bytes = "1.4"
+bytes = { version = "1.4", optional = true }
 libc = "0.2"
 log = "0.4"
 macaddr = "1.0"
@@ -33,12 +35,19 @@ tempfile = "3"
 tokio = { version = "1", features = ["macros", "time"] }
 
 [[example]]
+name = "custom_interface_device"
+required-features = ["io"]
+
+[[example]]
+name = "custom_interface_device_split"
+required-features = ["io"]
+
+[[example]]
 name = "custom_interface_device_async"
-required-features = ["tokio"]
+required-features = ["io", "tokio"]
 doc-scrape-examples = true
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 cargo-args = ["-Zunstable-options", "-Zrustdoc-scrape-examples"]
-

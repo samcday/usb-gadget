@@ -2,7 +2,9 @@
 //!
 //! The Linux kernel configuration option `CONFIG_USB_CONFIGFS_F_FS` must be enabled.
 
+#[cfg(feature = "io")]
 use bytes::{Bytes, BytesMut};
+#[cfg(feature = "io")]
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use proc_mounts::MountIter;
 use std::{
@@ -11,13 +13,18 @@ use std::{
     fmt, fs,
     fs::File,
     hash::Hash,
-    io::{Error, ErrorKind, Read, Result, Write},
-    os::fd::{AsFd, AsRawFd, RawFd},
+    io::{Error, ErrorKind, Result, Write},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, Weak,
+        Arc,
     },
+};
+#[cfg(feature = "io")]
+use std::{
+    io::Read,
+    os::fd::{AsFd, AsRawFd, RawFd},
+    sync::{Mutex, Weak},
     time::Duration,
 };
 use uuid::Uuid;
@@ -28,6 +35,7 @@ use super::{
 };
 use crate::{Class, Language};
 
+#[cfg(feature = "io")]
 mod aio;
 mod ffs;
 
@@ -160,6 +168,7 @@ pub struct EndpointDirection {
     direction: Direction,
     /// Queue length.
     pub queue_len: u32,
+    #[cfg(feature = "io")]
     tx: value::Sender<EndpointIo>,
 }
 
@@ -176,6 +185,7 @@ impl EndpointDirection {
     const DEFAULT_QUEUE_LEN: u32 = 16;
 
     /// From device to host.
+    #[cfg(feature = "io")]
     pub fn device_to_host() -> (EndpointSender, EndpointDirection) {
         let (tx, rx) = value::channel();
         let writer = EndpointSender(rx);
@@ -184,11 +194,24 @@ impl EndpointDirection {
     }
 
     /// From host to device.
+    #[cfg(feature = "io")]
     pub fn host_to_device() -> (EndpointReceiver, EndpointDirection) {
         let (tx, rx) = value::channel();
         let reader = EndpointReceiver(rx);
         let this = Self { direction: Direction::HostToDevice, tx, queue_len: Self::DEFAULT_QUEUE_LEN };
         (reader, this)
+    }
+
+    /// From device to host without runtime I/O support.
+    #[cfg(not(feature = "io"))]
+    pub fn device_to_host() -> (EndpointSender, EndpointDirection) {
+        (EndpointSender, Self { direction: Direction::DeviceToHost, queue_len: Self::DEFAULT_QUEUE_LEN })
+    }
+
+    /// From host to device without runtime I/O support.
+    #[cfg(not(feature = "io"))]
+    pub fn host_to_device() -> (EndpointReceiver, EndpointDirection) {
+        (EndpointReceiver, Self { direction: Direction::HostToDevice, queue_len: Self::DEFAULT_QUEUE_LEN })
     }
 
     /// Sets the queue length.
@@ -532,14 +555,19 @@ impl CustomBuilder {
     /// The returned handle must be added to a USB gadget configuration.
     pub fn build(self) -> (Custom, Handle) {
         let dir = FunctionDir::new();
-        let (ep0_tx, ep0_rx) = value::channel();
         let (ffs_dir_tx, ffs_dir_rx) = value::channel();
+        #[cfg(feature = "io")]
+        let (ep0_tx, ep0_rx) = value::channel();
+        #[cfg(feature = "io")]
         let ep_files = Arc::new(Mutex::new(Vec::new()));
         (
             Custom {
                 dir: dir.clone(),
+                #[cfg(feature = "io")]
                 ep0: ep0_rx,
+                #[cfg(feature = "io")]
                 setup_event: None,
+                #[cfg(feature = "io")]
                 ep_files: ep_files.clone(),
                 existing_ffs: false,
                 ffs_dir: ffs_dir_rx,
@@ -547,7 +575,9 @@ impl CustomBuilder {
             Handle::new(CustomFunction {
                 builder: self,
                 dir,
+                #[cfg(feature = "io")]
                 ep0_tx,
+                #[cfg(feature = "io")]
                 ep_files,
                 ffs_dir_created: AtomicBool::new(false),
                 ffs_dir_tx,
@@ -561,6 +591,7 @@ impl CustomBuilder {
     ///
     /// This allows usage of the custom interface functionality when the USB gadget has
     /// been registered externally.
+    #[cfg(feature = "io")]
     pub fn existing(mut self, ffs_dir: impl AsRef<Path>) -> Result<Custom> {
         self.ffs_dir = Some(ffs_dir.as_ref().to_path_buf());
 
@@ -579,7 +610,17 @@ impl CustomBuilder {
         };
         func.init()?;
 
-        Ok(Custom { dir, ep0: ep0_rx, setup_event: None, ep_files, existing_ffs: true, ffs_dir: ffs_dir_rx })
+        Ok(Custom {
+            dir,
+            #[cfg(feature = "io")]
+            ep0: ep0_rx,
+            #[cfg(feature = "io")]
+            setup_event: None,
+            #[cfg(feature = "io")]
+            ep_files,
+            existing_ffs: true,
+            ffs_dir: ffs_dir_rx,
+        })
     }
 
     /// Add an USB interface.
@@ -756,7 +797,9 @@ fn default_ffs_dir(instance: &OsStr) -> PathBuf {
 struct CustomFunction {
     builder: CustomBuilder,
     dir: FunctionDir,
+    #[cfg(feature = "io")]
     ep0_tx: value::Sender<Weak<File>>,
+    #[cfg(feature = "io")]
     ep_files: Arc<Mutex<Vec<Arc<File>>>>,
     ffs_dir_created: AtomicBool,
     ffs_dir_tx: value::Sender<PathBuf>,
@@ -801,26 +844,29 @@ impl CustomFunction {
 
             log::debug!("functionfs initialized");
 
-            // Open endpoint files.
-            let mut endpoint_num = 0;
-            let mut ep_files = Vec::new();
-            for intf in &self.builder.interfaces {
-                for ep in &intf.endpoints {
-                    endpoint_num += 1;
+            #[cfg(feature = "io")]
+            {
+                // Open endpoint files.
+                let mut endpoint_num = 0;
+                let mut ep_files = Vec::new();
+                for intf in &self.builder.interfaces {
+                    for ep in &intf.endpoints {
+                        endpoint_num += 1;
 
-                    let ep_path = ffs_dir.join(format!("ep{endpoint_num}"));
-                    let (ep_io, ep_file) = EndpointIo::new(ep_path, ep.direction.queue_len)?;
-                    ep.direction.tx.send(ep_io).unwrap();
-                    ep_files.push(ep_file);
+                        let ep_path = ffs_dir.join(format!("ep{endpoint_num}"));
+                        let (ep_io, ep_file) = EndpointIo::new(ep_path, ep.direction.queue_len)?;
+                        ep.direction.tx.send(ep_io).unwrap();
+                        ep_files.push(ep_file);
+                    }
                 }
+
+                // Provide endpoint 0 file.
+                let ep0 = Arc::new(ep0);
+                self.ep0_tx.send(Arc::downgrade(&ep0)).unwrap();
+                ep_files.push(ep0);
+
+                *self.ep_files.lock().unwrap() = ep_files;
             }
-
-            // Provide endpoint 0 file.
-            let ep0 = Arc::new(ep0);
-            self.ep0_tx.send(Arc::downgrade(&ep0)).unwrap();
-            ep_files.push(ep0);
-
-            *self.ep_files.lock().unwrap() = ep_files;
         }
 
         self.ffs_dir_tx.send(ffs_dir).unwrap();
@@ -829,6 +875,7 @@ impl CustomFunction {
     }
 
     /// Close all device files.
+    #[cfg(feature = "io")]
     fn close(&self) {
         self.ep_files.lock().unwrap().clear();
     }
@@ -871,6 +918,7 @@ impl Function for CustomFunction {
     }
 
     fn pre_removal(&self) -> Result<()> {
+        #[cfg(feature = "io")]
         self.close();
         Ok(())
     }
@@ -915,8 +963,11 @@ pub(crate) fn remove_handler(dir: PathBuf) -> Result<()> {
 #[derive(Debug)]
 pub struct Custom {
     dir: FunctionDir,
+    #[cfg(feature = "io")]
     ep0: value::Receiver<Weak<File>>,
+    #[cfg(feature = "io")]
     setup_event: Option<Direction>,
+    #[cfg(feature = "io")]
     ep_files: Arc<Mutex<Vec<Arc<File>>>>,
     existing_ffs: bool,
     ffs_dir: value::Receiver<PathBuf>,
@@ -952,12 +1003,14 @@ impl Custom {
         }
     }
 
+    #[cfg(feature = "io")]
     fn ep0(&mut self) -> Result<Arc<File>> {
         let ep0 = self.ep0.get()?;
         ep0.upgrade().ok_or_else(|| Error::new(ErrorKind::BrokenPipe, "USB gadget was removed"))
     }
 
     /// Returns real address of an interface.
+    #[cfg(feature = "io")]
     pub fn real_address(&mut self, intf: u8) -> Result<u8> {
         let ep0 = self.ep0()?;
         let address = unsafe { ffs::interface_revmap(ep0.as_raw_fd(), intf.into()) }?;
@@ -965,6 +1018,7 @@ impl Custom {
     }
 
     /// Clear previous event if it was forgotten.
+    #[cfg(feature = "io")]
     fn clear_prev_event(&mut self) -> Result<()> {
         let mut ep0 = self.ep0()?;
 
@@ -983,6 +1037,7 @@ impl Custom {
     }
 
     /// Blocking read event.
+    #[cfg(feature = "io")]
     fn read_event(&'_ mut self) -> Result<Event<'_>> {
         let mut ep0 = self.ep0()?;
 
@@ -996,6 +1051,7 @@ impl Custom {
     }
 
     /// Wait for an event for the specified duration.
+    #[cfg(feature = "io")]
     fn wait_event_sync(&mut self, timeout: Option<Duration>) -> Result<bool> {
         let ep0 = self.ep0()?;
 
@@ -1005,7 +1061,7 @@ impl Custom {
     }
 
     /// Asynchronously wait for an event to be available.
-    #[cfg(feature = "tokio")]
+    #[cfg(all(feature = "io", feature = "tokio"))]
     pub async fn wait_event(&mut self) -> Result<()> {
         use tokio::io::{unix::AsyncFd, Interest};
 
@@ -1019,6 +1075,7 @@ impl Custom {
     }
 
     /// Returns whether events are available for processing.
+    #[cfg(feature = "io")]
     pub fn has_event(&mut self) -> bool {
         self.wait_event_sync(Some(Duration::ZERO)).unwrap_or_default()
     }
@@ -1026,6 +1083,7 @@ impl Custom {
     /// Wait for an event and returns it.
     ///
     /// Blocks until an event becomes available.
+    #[cfg(feature = "io")]
     pub fn event(&'_ mut self) -> Result<Event<'_>> {
         self.clear_prev_event()?;
         self.read_event()
@@ -1034,6 +1092,7 @@ impl Custom {
     /// Wait for an event with a timeout and returns it.
     ///
     /// Blocks until an event becomes available.
+    #[cfg(feature = "io")]
     pub fn event_timeout(&'_ mut self, timeout: Duration) -> Result<Option<Event<'_>>> {
         if self.wait_event_sync(Some(timeout))? {
             Ok(Some(self.read_event()?))
@@ -1045,6 +1104,7 @@ impl Custom {
     /// Gets the next event, if available.
     ///
     /// Does not wait for an event to become available.
+    #[cfg(feature = "io")]
     pub fn try_event(&'_ mut self) -> Result<Option<Event<'_>>> {
         self.clear_prev_event()?;
 
@@ -1056,6 +1116,7 @@ impl Custom {
     }
 
     /// File descriptor of endpoint 0.
+    #[cfg(feature = "io")]
     pub fn fd(&mut self) -> Result<RawFd> {
         let ep0 = self.ep0()?;
         Ok(ep0.as_raw_fd())
@@ -1067,12 +1128,14 @@ impl Custom {
     }
 }
 
+#[cfg(feature = "io")]
 impl Drop for Custom {
     fn drop(&mut self) {
         self.ep_files.lock().unwrap().clear();
     }
 }
 
+#[cfg(feature = "io")]
 /// USB event.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -1097,6 +1160,7 @@ pub enum Event<'a> {
     Unknown(u8),
 }
 
+#[cfg(feature = "io")]
 impl<'a> Event<'a> {
     fn from_ffs(raw: ffs::Event, custom: &'a mut Custom) -> Self {
         match raw.event_type {
@@ -1126,17 +1190,20 @@ pub use ffs::CtrlReq;
 /// Sender for response to USB control request.
 ///
 /// Dropping this stalls the endpoint.
+#[cfg(feature = "io")]
 pub struct CtrlSender<'a> {
     ctrl_req: CtrlReq,
     custom: &'a mut Custom,
 }
 
+#[cfg(feature = "io")]
 impl fmt::Debug for CtrlSender<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("CtrlSender").field("ctrl_req", &self.ctrl_req).finish()
     }
 }
 
+#[cfg(feature = "io")]
 impl CtrlSender<'_> {
     /// The control request.
     pub const fn ctrl_req(&self) -> &CtrlReq {
@@ -1181,6 +1248,7 @@ impl CtrlSender<'_> {
     }
 }
 
+#[cfg(feature = "io")]
 impl Drop for CtrlSender<'_> {
     fn drop(&mut self) {
         if self.custom.setup_event.is_some() {
@@ -1192,17 +1260,20 @@ impl Drop for CtrlSender<'_> {
 /// Receiver for data belonging to USB control request.
 ///
 /// Dropping this stalls the endpoint.
+#[cfg(feature = "io")]
 pub struct CtrlReceiver<'a> {
     ctrl_req: CtrlReq,
     custom: &'a mut Custom,
 }
 
+#[cfg(feature = "io")]
 impl fmt::Debug for CtrlReceiver<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("CtrlReceiver").field("ctrl_req", &self.ctrl_req).finish()
     }
 }
 
+#[cfg(feature = "io")]
 impl CtrlReceiver<'_> {
     /// The control request.
     pub const fn ctrl_req(&self) -> &CtrlReq {
@@ -1254,6 +1325,7 @@ impl CtrlReceiver<'_> {
     }
 }
 
+#[cfg(feature = "io")]
 impl Drop for CtrlReceiver<'_> {
     fn drop(&mut self) {
         if self.custom.setup_event.is_some() {
@@ -1263,12 +1335,14 @@ impl Drop for CtrlReceiver<'_> {
 }
 
 /// Endpoint IO access.
+#[cfg(feature = "io")]
 struct EndpointIo {
     path: PathBuf,
     file: Weak<File>,
     aio: aio::Driver,
 }
 
+#[cfg(feature = "io")]
 impl EndpointIo {
     fn new(path: PathBuf, queue_len: u32) -> Result<(Self, Arc<File>)> {
         log::debug!("opening endpoint file {} with queue length {queue_len}", path.display());
@@ -1282,12 +1356,14 @@ impl EndpointIo {
     }
 }
 
+#[cfg(feature = "io")]
 impl fmt::Debug for EndpointIo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.path.display())
     }
 }
 
+#[cfg(feature = "io")]
 impl Drop for EndpointIo {
     fn drop(&mut self) {
         log::debug!("releasing endpoint file {}", self.path.display());
@@ -1297,6 +1373,7 @@ impl Drop for EndpointIo {
 /// USB endpoint control interface.
 ///
 /// All control requests are executed immediately, bypassing the send or receive queue.
+#[cfg(feature = "io")]
 #[derive(Debug)]
 pub struct EndpointControl<'a> {
     io: &'a EndpointIo,
@@ -1305,6 +1382,7 @@ pub struct EndpointControl<'a> {
 
 pub use ffs::{AudioEndpointDesc as RawAudioEndpointDesc, EndpointDesc as RawEndpointDesc};
 
+#[cfg(feature = "io")]
 impl<'a> EndpointControl<'a> {
     fn new(io: &'a EndpointIo, direction: Direction) -> Self {
         Self { io, direction }
@@ -1387,9 +1465,16 @@ impl<'a> EndpointControl<'a> {
 }
 
 /// USB endpoint from device to host sender.
+#[cfg(feature = "io")]
 #[derive(Debug)]
 pub struct EndpointSender(value::Receiver<EndpointIo>);
 
+#[cfg(not(feature = "io"))]
+#[doc = "USB endpoint from device to host sender placeholder when runtime I/O support is disabled."]
+#[derive(Debug, Clone, Copy)]
+pub struct EndpointSender;
+
+#[cfg(feature = "io")]
 impl EndpointSender {
     /// Gets the endpoint control interface.
     pub fn control(&'_ mut self) -> Result<EndpointControl<'_>> {
@@ -1597,9 +1682,16 @@ impl EndpointSender {
 }
 
 /// USB endpoint from host to device receiver.
+#[cfg(feature = "io")]
 #[derive(Debug)]
 pub struct EndpointReceiver(value::Receiver<EndpointIo>);
 
+#[cfg(not(feature = "io"))]
+#[doc = "USB endpoint from host to device receiver placeholder when runtime I/O support is disabled."]
+#[derive(Debug, Clone, Copy)]
+pub struct EndpointReceiver;
+
+#[cfg(feature = "io")]
 impl EndpointReceiver {
     /// Gets the endpoint control interface.
     pub fn control(&'_ mut self) -> Result<EndpointControl<'_>> {
